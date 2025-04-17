@@ -9,6 +9,7 @@
 #
 # See the LICENSE file in the source distribution for further information.
 
+import re
 from sos.report.plugins import Plugin, UbuntuPlugin
 
 
@@ -29,6 +30,21 @@ class Microk8s(Plugin, UbuntuPlugin):
 
     microk8s_cmd = "microk8s"
 
+    dqlite_bin = "/snap/microk8s/current/bin/dqlite"
+    microk8s_data_dir = "/var/snap/microk8s/current/var/kubernetes/backend"
+    cert = f"{microk8s_data_dir}/cluster.crt"
+    key = f"{microk8s_data_dir}/cluster.key"
+    servers = f"{microk8s_data_dir}/cluster.yaml"
+    dqlite_cmd = f"{dqlite_bin} -c {cert} -k {key} -s file://{servers} k8s"
+
+    try:
+        with open(servers, 'r', encoding='utf-8') as cluster_definition:
+            cluster = cluster_definition.read()
+            nodes = re.findall(r'Address:\s*(\d+\.\d+\.\d+\.\d+:\d+)', cluster)
+
+    except Exception:
+        pass
+
     def setup(self):
         self.add_journal(units="snap.microk8s.*")
 
@@ -40,12 +56,36 @@ class Microk8s(Plugin, UbuntuPlugin):
             'status',
             'version'
         ]
-        self.add_copy_spec(
-            "/var/snap/microk8s/current/credentials/client.config"
-        )
 
         self.add_cmd_output([
             f"{self.microk8s_cmd} {subcmd}" for subcmd in microk8s_subcmds
+        ])
+
+        dqlite_subcmds = [
+            f"\".describe {node}\" -f json" for node in self.nodes
+        ]
+
+        dqlite_subcmds.extend([
+            "\".cluster\"",
+            "\".cluster\" -f json",
+            "\".leader\""
+        ])
+
+        self.add_copy_spec([
+            "/var/snap/microk8s/current/credentials/client.config",
+            "/var/snap/microk8s/current/var/kubernetes/backend/info.yaml",
+            "/var/snap/microk8s/current/var/kubernetes/backend/cluster.yaml",
+            "/var/snap/microk8s/current/var/kubernetes/backend/failure-domain",
+        ])
+
+        for subcmd in dqlite_subcmds:
+            self.add_cmd_output(
+                f"{self.dqlite_cmd} {subcmd}",
+                suggest_filename=f"dqlite_{subcmd}"
+            )
+
+        self.add_cmd_output([
+            f"ls -al {self.microk8s_data_dir}",
         ])
 
     def postproc(self):
