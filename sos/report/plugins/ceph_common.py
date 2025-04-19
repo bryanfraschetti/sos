@@ -97,23 +97,40 @@ class CephCommon(Plugin, RedHatPlugin, UbuntuPlugin):
                     "/var/snap/microceph/common/logs/ceph.audit.log*",
                 ])
 
+            microceph_data_dir = "/var/snap/microceph/common/state/database"
+            self.add_cmd_output(f"ls -al {microceph_data_dir}")
+
+            self.add_copy_spec([
+                "/var/snap/microceph/common/state/daemon.yaml",
+                f"{microceph_data_dir}/cluster.yaml",
+                f"{microceph_data_dir}/info.yaml"
+            ])
+
             self.add_cmd_output("snap info microceph", subdir="microceph")
 
             cmds = [
                 'client config list',
                 'cluster config list',
                 'cluster list',
-                # exclude keyrings from the config db
-                'cluster sql \'select * from config where key NOT LIKE \
-                    \"%keyring%\"\'',
                 'disk list',
                 'log get-level',
                 'status',
+                # exclude keyrings from the config db
+                'cluster sql \'SELECT * FROM config WHERE key NOT LIKE \
+                    \"%keyring%\"\'',
+                'cluster sql \'SELECT id, name, expiry_date FROM \
+                    core_token_records\'',
+                'cluster sql \'SELECT * FROM services\'',
+                'cluster sql \'SELECT id, name, address, heartbeat, role FROM \
+                    core_cluster_members\'', # Same as cluster list but shows last heartbeat
+                # Essentially no point in running these
+                'cluster sql \'SELECT * FROM disk\'' # Same as microceph disk list
+                'cluster sql \'SELECT * FROM client_config\'' # Same as microceph client config list
             ]
 
             self.add_cmd_output([f"microceph {cmd}" for cmd in cmds],
                                 subdir='microceph')
-
+            
         self.add_cmd_output([
             "ceph -v",
         ])
