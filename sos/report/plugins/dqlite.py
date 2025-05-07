@@ -32,25 +32,23 @@ class dqlite(Plugin, IndependentPlugin):
 
         # Remove microk8s certificate data from config file
         protect_keys = [
-                "certificate-authority-data",
-                "client-certificate-data",
-                "client-key-data",
-            ]
+            "certificate-authority-data",
+            "client-certificate-data",
+            "client-key-data",
+        ]
 
         regexp = fr"^\s*(#?\s*({'|'.join(protect_keys)}):\s*)(\S.*)"
 
         self.do_file_sub(
             "/var/snap/microk8s/current/credentials/client.config",
             regexp,
-            r"\1 ******"
+            r"\1 ******",
         )
 
-    def run_batch_dqlite_queries(self, pkg, sql_cmd, sock, queries, tables):
-        endpoint = (
-            f"{pkg}/internal/sql"
-            if pkg == "lxd"
-            else f"{pkg}/core/internal/sql"
-        )
+    def run_batch_dqlite_queries(self, pkg, cfg, queries, tables):
+        sql_cmd = cfg.get("sql_cmd")
+        sock = cfg.get("socket")
+        endpoint = cfg.get("socket_endpoint")
         header = "Content-Type: application/json"
 
         curl_cmd = f"""
@@ -70,26 +68,24 @@ class dqlite(Plugin, IndependentPlugin):
             self.add_cmd_output(
                 socket_cmd,
                 suggest_filename=f"{pkg}_dqlite_{table}",
-                subdir=pkg
+                subdir=pkg,
             )
 
             if sql_cmd:
                 self.add_cmd_output(
                     f"{sql_cmd} {json.dumps(query)}",
                     suggest_filename=f"{sql_cmd}_{table}",
-                    subdir=pkg
+                    subdir=pkg,
                 )
 
     def baseCollection(self, pkg, cfg):
-        sql_cmd = cfg.get("sql_cmd")
         db_path = cfg.get("db_path")
-        sock = cfg.get("socket")
 
         # Check for inconsistent dqlite db intervals
         self.add_dir_listing(
             db_path,
             suggest_filename=f"ls_{pkg}_dqlite_dir",
-            subdir=pkg
+            subdir=pkg,
         )
 
         # All dqlite consumers except lxd have info.yaml and cluster.yaml
@@ -97,7 +93,7 @@ class dqlite(Plugin, IndependentPlugin):
             [
                 f"{db_path}/info.yaml",
                 f"{db_path}/cluster.yaml",
-                f"{db_path}/../daemon.yaml"  # Not expected for microk8s
+                f"{db_path}/../daemon.yaml",  # Not expected for microk8s
             ]
         )
 
@@ -109,7 +105,7 @@ class dqlite(Plugin, IndependentPlugin):
         queries = [
             "SELECT * FROM sqlite_master WHERE type=\"table\";",
         ]
-        tables = ["schema"]  # Table name will be used in filename
+        tables = ["schema",]  # Table name will be used in filename
 
         if pkg not in ("lxd",):
             queries.extend([
@@ -130,25 +126,22 @@ class dqlite(Plugin, IndependentPlugin):
             ])
             tables.extend(["config",])
 
-        if pkg in ("microceph", "microovn"):
+        if pkg in ("microceph", "microovn",):
             queries.extend(["SELECT * FROM services;",])
             tables.extend(["services",])
 
-        self.run_batch_dqlite_queries(pkg, sql_cmd, sock, queries, tables)
+        self.run_batch_dqlite_queries(pkg, cfg, queries, tables)
 
     def microcephCollection(self, pkg, cfg):
-        sql_cmd = cfg.get("sql_cmd")
-        sock = cfg.get("socket")
-
         queries = [
             "SELECT * FROM disks;",
             "SELECT * FROM client_config;",
-            "SELECT * FROM remote;"
+            "SELECT * FROM remote;",
         ]
 
         tables = ["disks", "client_config", "remote",]
 
-        self.run_batch_dqlite_queries(pkg, sql_cmd, sock, queries, tables)
+        self.run_batch_dqlite_queries(pkg, cfg, queries, tables)
 
     def microovnCollection(self, pkg, cfg):
         """ Currently empty, as nothing currently necessitates unique microovn
@@ -205,7 +198,7 @@ class dqlite(Plugin, IndependentPlugin):
             self.add_cmd_output(
                 f"{dqlite_cmd} {query}",
                 suggest_filename=suggested_name,
-                subdir=pkg
+                subdir=pkg,
             )
 
     def lxdCollection(self, pkg, cfg):
@@ -219,32 +212,37 @@ class dqlite(Plugin, IndependentPlugin):
                 "db_path": "/var/snap/microceph/common/state/database",
                 "socket": "/var/snap/microceph/common/state/control.socket",
                 "sql_cmd": "microceph cluster sql",
-                "collection": self.microcephCollection
+                "socket_endpoint": "microceph/core/internal/sql",
+                "collection": self.microcephCollection,
             },
             "microovn": {
                 "db_path": "/var/snap/microovn/common/state/database",
                 "socket": "/var/snap/microovn/common/state/control.socket",
                 "sql_cmd": "microovn cluster sql",
-                "collection": self.microovnCollection
+                "socket_endpoint": "microovn/core/internal/sql",
+                "collection": self.microovnCollection,
             },
             "microcloud": {
                 "db_path": "/var/snap/microcloud/common/state/database",
                 "socket": "/var/snap/microcloud/common/state/control.socket",
                 "sql_cmd": "microcloud sql",
-                "collection": self.microcloudCollection
+                "socket_endpoint": "microcloud/core/internal/sql",
+                "collection": self.microcloudCollection,
             },
             "microk8s": {
                 "db_path": "/var/snap/microk8s/current/var/kubernetes/backend",
                 "socket": "/var/snap/microk8s/current/var/kubernetes/backend/"
                 "kine.sock:12379",
                 "sql_cmd": None,
-                "collection": self.microk8sCollection
+                "socket_endpoint": "microk8s/core/internal/sql",
+                "collection": self.microk8sCollection,
             },
             "lxd": {
                 "db_path": "/var/snap/lxd/common/lxd/database/global",
                 "socket": "/var/snap/lxd/common/lxd/unix.socket",
                 "sql_cmd": "lxd sql local",
-                "collection": self.lxdCollection
+                "socket_endpoint": "lxd/internal/sql",
+                "collection": self.lxdCollection,
             }
         }
 
