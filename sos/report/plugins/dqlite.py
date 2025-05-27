@@ -28,28 +28,12 @@ class dqlite(Plugin, IndependentPlugin):
 
     packages = ('microk8s', 'microceph', 'microovn', 'microcloud', 'lxd',)
 
-    def postproc(self):
-
-        # Remove microk8s certificate data from config file
-        protect_keys = [
-            "certificate-authority-data",
-            "client-certificate-data",
-            "client-key-data",
-        ]
-
-        regexp = fr"^\s*(#?\s*({'|'.join(protect_keys)}):\s*)(\S.*)"
-
-        self.do_file_sub(
-            "/var/snap/microk8s/current/credentials/client.config",
-            regexp,
-            r"\1 ******",
-        )
-
-    def run_batch_dqlite_queries(self, pkg, cfg, queries):
+    def run_batch_dqlite_queries(self, pkg, cfg):
         sql_cmd = cfg.get("sql_cmd")
         sock = cfg.get("socket")
         predicate = cfg.get("predicate")
         endpoint = cfg.get("socket_endpoint")
+        queries = cfg.get("queries")
         header = "Content-Type: application/json"
 
         curl_cmd = f"""
@@ -62,8 +46,22 @@ class dqlite(Plugin, IndependentPlugin):
         for query_entry in queries:
             query = query_entry.get("query")
             table_name = query_entry.get("table")
+            lxd_db = query_entry.get("db", "local")
+
+            sql_cmd = (
+                    f"{cfg.get('sql_cmd')} {lxd_db}" if pkg == "lxd"
+                    else sql_cmd
+                )
+
+            self.add_cmd_output(
+                f"{sql_cmd} {json.dumps(query)}",
+                suggest_filename=f"{sql_cmd}_{table_name}",
+                subdir=pkg,
+                pred=predicate
+            )
+
             query_json = json.dumps(
-                {"query": query, "database": "local"} if pkg == "lxd"
+                {"query": query, "database": lxd_db} if pkg == "lxd"
                 else {"query": query}
             )
             socket_cmd = f"{curl_cmd} '{query_json}'"
@@ -73,13 +71,6 @@ class dqlite(Plugin, IndependentPlugin):
                 suggest_filename=f"{pkg}_dqlite_{table_name}",
                 subdir=pkg,
                 pred=predicate,
-            )
-
-            self.add_cmd_output(
-                f"{sql_cmd} {json.dumps(query)}",
-                suggest_filename=f"{sql_cmd}_{table_name}",
-                subdir=pkg,
-                pred=predicate
             )
 
     def base_collection(self, pkg, cfg):
@@ -106,32 +97,13 @@ class dqlite(Plugin, IndependentPlugin):
             # At this time, microk8s is rather divergent w.r.t querying
             return
 
-        queries = [{
+        cfg["queries"].extend([{
             "query": "SELECT * FROM sqlite_master WHERE type=\"table\";",
             "table": "schema",  # Table name will be used in filename
-        },]
-
-        if pkg not in ("lxd",):
-            queries.extend([
-                {
-                    "query": (
-                        "SELECT id, name, expiry_date "
-                        "FROM core_token_records;"
-                    ),
-                    "table": "token_records",
-                },
-                {
-                    "query": (
-                        "SELECT id, name, address, schema_internal, "
-                        "schema_external, heartbeat, role, api_extensions "
-                        "FROM core_cluster_members;"
-                    ),
-                    "table": "core_cluster_members",
-                },
-            ])
+        },])
 
         if pkg not in ("microcloud",):
-            queries.append({
+            cfg["queries"].extend([{
                 "query": (
                     "SELECT * FROM config WHERE NOT ( "
                     "key LIKE \"%keyring%\" OR "
@@ -139,18 +111,18 @@ class dqlite(Plugin, IndependentPlugin):
                     "key LIKE \"%ca_key%\" );"
                 ),
                 "table": "config",
-            })
+            },])
 
         if pkg in ("microceph", "microovn",):
-            queries.append({
+            cfg["queries"].extend([{
                 "query": "SELECT * FROM services;",
                 "table": "services",
-            })
+            },])
 
-        self.run_batch_dqlite_queries(pkg, cfg, queries)
+        self.run_batch_dqlite_queries(pkg, cfg)
 
-    def microceph_collection(self, pkg, cfg):
-        queries = [
+    def microceph_collection(self, cfg):
+        cfg["queries"].extend([
             {
                 "query": "SELECT * FROM disks;",
                 "table": "disks",
@@ -163,21 +135,20 @@ class dqlite(Plugin, IndependentPlugin):
                 "query": "SELECT * FROM remote;",
                 "table": "remote",
             },
-        ]
+        ])
 
-        self.run_batch_dqlite_queries(pkg, cfg, queries)
-
-    def microovn_collection(self, pkg, cfg):
+    def microovn_collection(self, cfg):
         """ Currently empty, as nothing currently necessitates unique microovn
         dqlite collection. A no-op, present for future extension
         """
 
-    def microcloud_collection(self, pkg, cfg):
+    def microcloud_collection(self, cfg):
         """ Currently empty, as nothing currently necessitates unique
         microcloud dqlite collection. A no-op, present for future extension
         """
 
-    def microk8s_collection(self, pkg, cfg):
+    def microk8s_collection(self, cfg):
+        pkg = "microk8s"
         db_path = cfg.get("db_path")
         predicate = cfg.get("predicate")
 
@@ -227,10 +198,53 @@ class dqlite(Plugin, IndependentPlugin):
                 pred=predicate,
             )
 
-    def lxd_collection(self, pkg, cfg):
-        """ Currently empty, as nothing currently necessitates unique
-        lxd dqlite collection. A no-op, present for future extension
-        """
+    def lxd_collection(self, cfg):
+        cfg["queries"].extend([
+            {
+                "query": "SELECT * FROM nodes;",
+                "table": "nodes",
+                "db": "global",
+            },
+            {
+                "query": "SELECT * FROM nodes_roles;",
+                "table": "nodes_roles",
+                "db": "global",
+            },
+            {
+                "query": "SELECT * FROM raft_nodes;",
+                "table": "raft_nodes",
+                "db": "local",
+            },
+        ])
+
+    def generate_microcluster_pkg_map(self, pkg, collection):
+        sql_cmd = f"{pkg} sql" if pkg == "microcloud" else f"{pkg} cluster sql"
+
+        return {
+            "db_path": f"/var/snap/{pkg}/common/state/database",
+            "socket": f"/var/snap/{pkg}/common/state/control.socket",
+            "socket_endpoint": f"{pkg}/core/internal/sql",
+            "sql_cmd": sql_cmd,
+            "collection": collection,
+            "predicate": None,
+            "queries": [
+                {
+                    "query": (
+                        "SELECT id, name, expiry_date "
+                        "FROM core_token_records;"
+                    ),
+                    "table": "token_records",
+                },
+                {
+                    "query": (
+                        "SELECT id, name, address, schema_internal, "
+                        "schema_external, heartbeat, role, api_extensions "
+                        "FROM core_cluster_members;"
+                    ),
+                    "table": "core_cluster_members",
+                },
+            ]
+        }
 
     def setup(self):
         lxd_pred = (
@@ -247,30 +261,18 @@ class dqlite(Plugin, IndependentPlugin):
         )
 
         packages = {
-            "microceph": {
-                "db_path": "/var/snap/microceph/common/state/database",
-                "socket": "/var/snap/microceph/common/state/control.socket",
-                "sql_cmd": "microceph cluster sql",
-                "socket_endpoint": "microceph/core/internal/sql",
-                "collection": self.microceph_collection,
-                "predicate": None,
-            },
-            "microovn": {
-                "db_path": "/var/snap/microovn/common/state/database",
-                "socket": "/var/snap/microovn/common/state/control.socket",
-                "sql_cmd": "microovn cluster sql",
-                "socket_endpoint": "microovn/core/internal/sql",
-                "collection": self.microovn_collection,
-                "predicate": None,
-            },
-            "microcloud": {
-                "db_path": "/var/snap/microcloud/common/state/database",
-                "socket": "/var/snap/microcloud/common/state/control.socket",
-                "sql_cmd": "microcloud sql",
-                "socket_endpoint": "microcloud/core/internal/sql",
-                "collection": self.microcloud_collection,
-                "predicate": None,
-            },
+            "microceph": self.generate_microcluster_pkg_map(
+                "microceph",
+                self.microceph_collection
+            ),
+            "microovn": self.generate_microcluster_pkg_map(
+                "microovn",
+                self.microovn_collection
+            ),
+            "microcloud": self.generate_microcluster_pkg_map(
+                "microcloud",
+                self.microcloud_collection
+            ),
             "microk8s": {
                 "db_path": "/var/snap/microk8s/current/var/kubernetes/backend",
                 "socket": "/var/snap/microk8s/current/var/kubernetes/backend/"
@@ -279,20 +281,37 @@ class dqlite(Plugin, IndependentPlugin):
                 "socket_endpoint": "microk8s/core/internal/sql",
                 "collection": self.microk8s_collection,
                 "predicate": None,
+                "queries": [],
             },
             "lxd": {
                 "db_path": "/var/snap/lxd/common/lxd/database/global",
                 "socket": "/var/snap/lxd/common/lxd/unix.socket",
-                "sql_cmd": "lxd sql local",
+                "sql_cmd": "lxd sql",
                 "socket_endpoint": "lxd/internal/sql",
                 "collection": self.lxd_collection,
                 "predicate": lxd_pred,
+                "queries": [],
             }
         }
 
         for pkg, config in packages.items():
             if self.is_installed(pkg):
+                config.get("collection")(config)
                 self.base_collection(pkg, config)
-                config.get("collection")(pkg, config)
 
+    def postproc(self):
+        # Remove microk8s certificate data from config file
+        protect_keys = [
+            "certificate-authority-data",
+            "client-certificate-data",
+            "client-key-data",
+        ]
+
+        regexp = fr"^\s*(#?\s*({'|'.join(protect_keys)}):\s*)(\S.*)"
+
+        self.do_file_sub(
+            "/var/snap/microk8s/current/credentials/client.config",
+            regexp,
+            r"\1 ******",
+        )
 # vim: set et ts=4 sw=4 :
